@@ -98,15 +98,43 @@ void Handler::refreshServerPool()
 
 void Handler::checkConnectionPool()
 {
+    // Periodic statistics for failed servers (every 10 seconds)
+    static thread_local long lastStatsLogTime = 0;
+    long now = Util::nowUSec();
+    bool shouldLogStats = (now - lastStatsLogTime > 10000000);  // 10 seconds
+
+    int failedServerCount = 0;
+    int offlineServerCount = 0;
+
     for (auto p : mConnPool) {
         try {
             if (p) {
                 p->check();
+
+                // Count failed and offline servers for periodic stats
+                if (shouldLogStats) {
+                    Server* serv = p->server();
+                    if (serv->fail()) {
+                        failedServerCount++;
+                    }
+                    if (!serv->online()) {
+                        offlineServerCount++;
+                    }
+                }
             }
         } catch (ExceptionBase& excp) {
             logError("h %d check connection pool %s excp %s",
                       id(), p->server()->addr().data(), excp.what());
         }
+    }
+
+    // Log periodic statistics
+    if (shouldLogStats) {
+        if (failedServerCount > 0 || offlineServerCount > 0) {
+            logWarn("h %d connection pool status: %d FAILED servers, %d OFFLINE servers (total pools=%d)",
+                    id(), failedServerCount, offlineServerCount, (int)mConnPool.size());
+        }
+        lastStatsLogTime = now;
     }
 }
 
@@ -259,6 +287,9 @@ void Handler::postConnectConnectionEvent()
             case Socket::EventError:
                 {
                     Server* serv = s->server();
+                    logWarn("h %d backend connection error: s %s %d status %d %s, good=%d, evts=%d, pend_reqs=%d",
+                            id(), s->peer(), s->fd(), s->status(), s->statusStr(),
+                            s->good(), evts, s->pendRequestCount());
                     serv->incrFail();
                     if (serv->fail()) {
                         logNotice("server %s mark failure", serv->addr().data());
@@ -269,7 +300,7 @@ void Handler::postConnectConnectionEvent()
                 break;
             }
             auto c = s->acceptConnection();
-            logNotice("h %d close s %s %d and c %s %d with status %d %s",
+            logWarn("h %d close s %s %d and c %s %d with status %d %s",
                     id(), s->peer(), s->fd(),
                     c ? c->peer() : "None", c ? c->fd() : -1,
                     s->status(), s->statusStr());
@@ -527,6 +558,16 @@ void Handler::handleRequest(Request* req)
     }
     ConnectConnection* s = getConnectConnection(req, serv);
     if (!s || !s->good()) {
+        if (!s) {
+            logWarn("h %d c %s req %ld cmd %s key %.*s: no server connection available for server %s (returned null)",
+                    id(), req->connection() ? req->connection()->peer() : "None",
+                    req->id(), req->cmd(), key.length(), key.data(), serv->addr().data());
+        } else {
+            logWarn("h %d c %s req %ld cmd %s key %.*s: server connection %s %d not good, status %d %s",
+                    id(), req->connection() ? req->connection()->peer() : "None",
+                    req->id(), req->cmd(), key.length(), key.data(),
+                    s->peer(), s->fd(), s->status(), s->statusStr());
+        }
         directResponse(req, Response::NoServerConnection);
         return;
     }
@@ -1369,9 +1410,19 @@ void Handler::innerResponse(ConnectConnection* s, Request* req, Response* res)
             Server* serv = s->server();
             if (serv->fail()) {
                 serv->setFail(false);
-                logNotice("h %d s %s %d mark server alive",
-                        id(), s->peer(), s->fd());
+                logWarn("h %d s %s %d received PONG, marking server %s as ALIVE (previous failCnt=%ld)",
+                        id(), s->peer(), s->fd(), serv->addr().data(), (long)serv->failureCnt());
+            } else {
+                // Server was already alive, PONG received successfully
+                logWarn("h %d s %s %d received PONG, server %s already ALIVE (failCnt=%ld)",
+                        id(), s->peer(), s->fd(), serv->addr().data(), (long)serv->failureCnt());
             }
+        } else if (s) {
+            // PING failed - did not receive PONG
+            Server* serv = s->server();
+            logWarn("h %d s %s %d PING FAILED: expected PONG but got %s, server %s (fail=%d, failCnt=%ld)",
+                    id(), s->peer(), s->fd(), res->typeStr(), serv->addr().data(),
+                    serv->fail(), (long)serv->failureCnt());
         }
         break;
     case Command::AuthServ:

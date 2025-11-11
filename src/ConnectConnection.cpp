@@ -28,7 +28,7 @@ bool ConnectConnection::writeEvent(Handler* h)
 {
     FuncCallTimer();
     if (connectStatus() == Connecting) {
-        logInfo("h %d s %s %d connect succ",
+        logWarn("h %d s %s %d connect succ",
                 h->id(), peer(), fd());
         setConnectStatus(Connected);
     }
@@ -220,6 +220,13 @@ void ConnectConnection::handleResponse(Handler* h)
 
 void ConnectConnection::close(Handler* h)
 {
+    int currentFd = fd();
+    int currentStatus = status();
+    int pendReqs = mSentRequests.size() + mSendRequests.size();
+
+    logWarn("h %d ConnectConnection::close() called: s %s %d, status=%d (%s), pend_reqs=%d",
+            h->id(), peer(), currentFd, currentStatus, statusStr(), pendReqs);
+
     SendRequestList* reqs[2] = {&mSentRequests, &mSendRequests};
     for (int i = 0; i < 2; ++i) {
         while (!reqs[i]->empty()) {
@@ -228,7 +235,13 @@ void ConnectConnection::close(Handler* h)
             reqs[i]->pop_front();
         }
     }
+
+    logWarn("h %d ConnectConnection::close() calling ConnectSocket::close(): s %s %d",
+            h->id(), peer(), currentFd);
     ConnectSocket::close();
     mParser.reset();
+
+    logWarn("h %d ConnectConnection::close() completed: s %s, old_fd=%d, new_fd=%d",
+            h->id(), peer(), currentFd, fd());
 }
 

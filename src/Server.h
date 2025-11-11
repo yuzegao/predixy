@@ -104,9 +104,10 @@ public:
     {
         return mFail;
     }
-    void setFail(bool v)
+    void setFail(bool v);
+    long failureCnt() const
     {
-        mFail = v;
+        return mFailureCnt;
     }
     bool online() const
     {
